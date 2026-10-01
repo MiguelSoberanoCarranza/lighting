@@ -148,6 +148,16 @@ export class Renderer {
     const gl = canvas.getContext('webgl', { alpha: false, antialias: true, premultipliedAlpha: false, stencil: true });
     if (!gl) throw new Error('WebGL no disponible');
     this.gl = gl;
+    this.init();
+  }
+
+  // (Re)crea shaders, buffers y texturas: se llama al inicio y cuando el
+  // sistema devuelve el contexto gráfico después de perderlo.
+  init() {
+    const gl = this.gl;
+    this.lost = false;
+    this.maxTex = gl.getParameter(gl.MAX_TEXTURE_SIZE) || 2048;
+    this.scaled = new Map();
     const prog = gl.createProgram();
     for (const [type, src] of [[gl.VERTEX_SHADER, VS], [gl.FRAGMENT_SHADER, FS]]) {
       const s = gl.createShader(type);
@@ -200,10 +210,23 @@ export class Renderer {
     if (e.el !== el) { e.el = el; e.uploaded = -1; }
     if (!isReady(el)) return e.uploaded >= 0 ? e.t : null;
     const dynamic = el instanceof HTMLVideoElement;
+    const w = el.videoWidth || el.naturalWidth || el.width, h = el.videoHeight || el.naturalHeight || el.height;
+    let src = el;
+    if (Math.max(w, h) > this.maxTex) {
+      // más grande de lo que acepta la GPU: se reduce (si no, la superficie queda en negro)
+      let c = this.scaled.get(key);
+      const k = this.maxTex / Math.max(w, h);
+      if (!c) { c = document.createElement('canvas'); this.scaled.set(key, c); }
+      if (e.uploaded < 0 || dynamic) {
+        c.width = Math.floor(w * k); c.height = Math.floor(h * k);
+        c.getContext('2d').drawImage(el, 0, 0, c.width, c.height);
+      }
+      src = c;
+    }
     gl.bindTexture(gl.TEXTURE_2D, e.t);
     if (e.uploaded < 0 || (dynamic && e.uploaded !== this.frame)) {
       try {
-        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, el);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, src);
         e.uploaded = this.frame;
       } catch (err) {
         return null;
@@ -236,6 +259,7 @@ export class Renderer {
   // items: [{ faces: [{ pts, gain }], poly?, shape, mode, texKey, el, c1, c2, time, opacity, feather }]
   draw(items) {
     const gl = this.gl;
+    if (this.lost || gl.isContextLost()) return;
     this.frame++;
     gl.clearColor(0, 0, 0, 1);
     gl.clearStencil(0);

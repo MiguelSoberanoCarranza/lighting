@@ -1,6 +1,6 @@
 // Red primero, caché como respaldo: así siempre recibes la versión nueva
 // pero la app abre aunque no haya internet (el enlace celular-proyector sí lo necesita).
-const CACHE = 'proyectalo-v4';
+const CACHE = 'proyectalo-v5';
 const ASSETS = ['./', 'index.html', 'css/style.css', 'js/app.js', 'js/renderer.js', 'js/store.js', 'js/link.js', 'js/shapes.js', 'js/vision.js', 'js/vision-ui.js',
   'vendor/peerjs.min.js', 'vendor/qrcode.js', 'manifest.webmanifest', 'icons/icon.svg'];
 

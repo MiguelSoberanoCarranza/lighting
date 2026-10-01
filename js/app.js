@@ -3,7 +3,7 @@ import * as store from './store.js';
 import { Link } from './link.js';
 import { openVisionTool, visionHelp } from './vision-ui.js';
 import { photoToProjector } from './vision.js';
-import { SHAPES, shapeOf, placeShape, facesOf, hullOf, outlinesOf, pointInPoly, simplifyClosed } from './shapes.js';
+import { SHAPES, shapeOf, placeShape, facesOf, hullOf, outlinesOf, pointInPoly, simplifyClosed, isValidShape, rescueShape } from './shapes.js';
 
 // ---------- constantes ----------
 const EFFECTS = [
@@ -96,6 +96,7 @@ function loadState() {
 }
 
 let state = loadState() || defaultState();
+state.surfaces.forEach(rescueShape);
 let sel = state.surfaces[0]?.id ?? null;
 let selCorner = -1;
 let role = 'local';          // local | output | remote
@@ -205,6 +206,15 @@ try {
   document.body.innerHTML = '<p style="padding:24px;color:#fff">Tu navegador no soporta WebGL: ' + esc(err.message) + '</p>';
   throw err;
 }
+
+// En celulares el sistema puede liberar la memoria gráfica (cambiar de app,
+// apagar pantalla, videos pesados). Sin esto todo se quedaba en negro.
+glCanvas.addEventListener('webglcontextlost', e => { e.preventDefault(); renderer.lost = true; });
+glCanvas.addEventListener('webglcontextrestored', () => {
+  renderer.init();
+  textCanvases.clear();
+  layout();
+});
 
 let W = 1, H = 1, DPR = 1;
 function layout() {
@@ -412,9 +422,14 @@ ovCanvas.addEventListener('pointermove', ev => {
   const s = drag.s;
   if (drag.corner >= 0) {
     const [sx, sy] = drag.start[drag.corner];
+    const prev = s.pts[drag.corner];
     s.pts[drag.corner] = [clamp(sx + dx, -0.5, 1.5), clamp(sy + dy, -0.5, 1.5)];
+    if (!isValidShape(s)) { s.pts[drag.corner] = prev; return; }
   } else {
-    s.pts = drag.start.map(([sx, sy]) => [sx + dx, sy + dy]);
+    const cx = drag.start.reduce((a, q) => a + q[0], 0) / drag.start.length;
+    const cy = drag.start.reduce((a, q) => a + q[1], 0) / drag.start.length;
+    const mx = clamp(cx + dx, 0.03, 0.97) - cx, my = clamp(cy + dy, 0.03, 0.97) - cy;
+    s.pts = drag.start.map(([sx, sy]) => [sx + mx, sy + my]);
   }
   changed();
 });
@@ -430,8 +445,10 @@ function nudge(dx, dy) {
   const s = selected();
   if (!s) return;
   const step = (precision ? 0.25 : 1) / Math.max(W, H) * 2;
-  if (selCorner >= 0) s.pts[selCorner] = [s.pts[selCorner][0] + dx * step, s.pts[selCorner][1] + dy * step];
+  const before = s.pts.map(p => [...p]);
+  if (selCorner >= 0) s.pts[selCorner] = [clamp(s.pts[selCorner][0] + dx * step, -0.5, 1.5), clamp(s.pts[selCorner][1] + dy * step, -0.5, 1.5)];
   else s.pts = s.pts.map(([x, y]) => [x + dx * step, y + dy * step]);
+  if (!isValidShape(s) || rescueShape(s)) { s.pts = before; return; }
   changed();
 }
 
@@ -777,6 +794,7 @@ async function onMessage(m) {
   if (role === 'output') {
     if (m.t === 'state') {
       state = m.state;
+      state.surfaces.forEach(rescueShape);
       remoteUI = m.ui || remoteUI;
       try { localStorage.setItem(SAVE_KEY, JSON.stringify(state)); } catch { /* nada */ }
       const need = [];

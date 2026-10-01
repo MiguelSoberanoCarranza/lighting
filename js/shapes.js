@@ -129,3 +129,37 @@ export function simplifyClosed(raw, eps) {
   const pts = [...simplify(raw.slice(0, far + 1), eps).slice(0, -1), ...simplify([...raw.slice(far), raw[0]], eps).slice(0, -1)];
   return pts;
 }
+
+function convex(q) {
+  // cuadrilátero convexo y no degenerado (en cualquier sentido de giro)
+  let sign = 0;
+  for (let i = 0; i < 4; i++) {
+    const [ax, ay] = q[i], [bx, by] = q[(i + 1) % 4], [cx, cy] = q[(i + 2) % 4];
+    const cr = (bx - ax) * (cy - by) - (by - ay) * (cx - bx);
+    if (Math.abs(cr) < 1e-6) return false;
+    const sg = Math.sign(cr);
+    if (sign && sg !== sign) return false;
+    sign = sg;
+  }
+  return true;
+}
+
+// Una forma es dibujable si todas sus caras son cuadriláteros convexos.
+// Si una esquina cruza a otra, la perspectiva se invierte y la superficie desaparece.
+export function isValidShape(s) {
+  if (shapeOf(s) === 'poly') return s.pts.length >= 3;
+  return facesOf(s).every(f => convex(f.pts));
+}
+
+// Si la superficie quedó totalmente fuera de la pantalla, la regresa al centro.
+export function rescueShape(s) {
+  const xs = s.pts.map(p => p[0]), ys = s.pts.map(p => p[1]);
+  const [x0, y0, x1, y1] = [Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)];
+  const bad = s.pts.some(p => !Number.isFinite(p[0]) || !Number.isFinite(p[1]));
+  if (!bad && x1 > 0.02 && y1 > 0.02 && x0 < 0.98 && y0 < 0.98 && isValidShape(s)) return false;
+  const sh = shapeOf(s);
+  s.pts = bad || !isValidShape(s) || x1 - x0 > 1.5 || y1 - y0 > 1.5
+    ? placeShape(sh, [0.25, 0.25, 0.75, 0.75], sh === 'poly' && !bad ? s.pts : undefined)
+    : s.pts.map(([x, y]) => [x - (x0 + x1) / 2 + 0.5, y - (y0 + y1) / 2 + 0.5]);
+  return true;
+}
