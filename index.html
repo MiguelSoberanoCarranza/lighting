@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+  <title>Proyéctalo · Projection mapping</title>
+  <meta name="description" content="Projection mapping desde tu celular: conecta un proyector, ajusta las esquinas sobre cualquier objeto y proyecta videos, fotos, texto y efectos de luz.">
+  <meta name="theme-color" content="#000000">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="icons/icon.svg">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body data-role="local">
+  <div id="stage">
+    <canvas id="gl"></canvas>
+    <canvas id="overlay"></canvas>
+  </div>
+
+  <div id="chip" class="chip"></div>
+
+  <div id="nudge" aria-label="Ajuste fino">
+    <button id="nudge-corner" class="label">Toda</button>
+    <div class="pad">
+      <span></span><button data-d="0,-1" aria-label="Arriba">▲</button><span></span>
+      <button data-d="-1,0" aria-label="Izquierda">◀</button>
+      <button id="precision" aria-label="Precisión fina" title="Precisión fina">🎯</button>
+      <button data-d="1,0" aria-label="Derecha">▶</button>
+      <span></span><button data-d="0,1" aria-label="Abajo">▼</button><span></span>
+    </div>
+  </div>
+
+  <section id="sheet"></section>
+
+  <nav id="bar">
+    <button id="btn-add"><b>＋</b><span>Superficie</span></button>
+    <button data-sheet="content"><b>🎬</b><span>Contenido</span></button>
+    <button data-sheet="adjust"><b>🎚️</b><span>Ajustes</span></button>
+    <button data-sheet="layers"><b>☰</b><span>Capas</span></button>
+    <button data-sheet="connect"><b>📡</b><span>Conectar</span></button>
+    <button id="btn-show" class="primary"><b>▶</b><span>Show</span></button>
+  </nav>
+
+  <div id="outcard"></div>
+  <button id="exit">✕ Salir del show</button>
+  <div id="toast" role="status"></div>
+
+  <script src="vendor/qrcode.js"></script>
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>
