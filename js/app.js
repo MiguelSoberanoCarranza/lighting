@@ -1,6 +1,7 @@
 import { Renderer } from './renderer.js';
 import * as store from './store.js';
 import { Link } from './link.js';
+import { SHAPES, shapeOf, placeShape, facesOf, hullOf, outlinesOf, pointInPoly, simplify } from './shapes.js';
 
 // ---------- constantes ----------
 const EFFECTS = [
@@ -34,11 +35,21 @@ function toast(msg, ms = 2200) {
 }
 
 // ---------- estado ----------
-function newSurface(n) {
+// Rectángulo que se ve cuadrado en pantalla (las coordenadas son 0..1 en cada eje).
+function squareRect(cx, cy, size) {
+  const a = W / H || 1;
+  const w = a > 1 ? size / a : size, h = a > 1 ? size : size * a;
+  return [cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2];
+}
+
+function newSurface(n, shape = 'quad', pts = null) {
   const m = 0.18 + (n % 4) * 0.05;
+  const rect = shape === 'cube' || shape === 'circle'
+    ? squareRect(0.5, 0.5, 0.64 - (n % 4) * 0.1)
+    : [m, m, 1 - m, 1 - m];
   return {
-    id: uid(), name: 'Superficie ' + (n + 1),
-    pts: [[m, m], [1 - m, m], [1 - m, 1 - m], [m, 1 - m]],
+    id: uid(), name: SHAPES[shape].name + ' ' + (n + 1), shape,
+    pts: pts || placeShape(shape, rect),
     src: { kind: 'effect', effect: 'grid' },
     color: '#ffffff', color2: '#ff2d95',
     opacity: 1, feather: 0, speed: 1, visible: true,
@@ -192,7 +203,7 @@ function layout() {
 window.addEventListener('resize', layout);
 
 function itemFor(s, time) {
-  const base = { pts: s.pts, c1: s.color, c2: s.color2, time: time * s.speed, opacity: s.opacity, feather: s.feather };
+  const base = { faces: facesOf(s), poly: shapeOf(s) === 'poly' ? s.pts : null, shape: shapeOf(s) === 'circle' ? 1 : 0, c1: s.color, c2: s.color2, time: time * s.speed, opacity: s.opacity, feather: s.feather };
   const src = s.src || {};
   if (src.kind === 'color') return { ...base, mode: 1 };
   if (src.kind === 'effect') return { ...base, mode: (EFFECT_BY_ID[src.effect] || EFFECTS[0]).mode };
@@ -225,8 +236,10 @@ function drawOverlay() {
     const isSel = s.id === curSel;
     const p = s.pts.map(([x, y]) => [x * W, y * H]);
     ov.beginPath();
-    p.forEach(([x, y], i) => (i ? ov.lineTo(x, y) : ov.moveTo(x, y)));
-    ov.closePath();
+    for (const line of outlinesOf(s)) {
+      line.forEach(([x, y], i) => (i ? ov.lineTo(x * W, y * H) : ov.moveTo(x * W, y * H)));
+      ov.closePath();
+    }
     ov.lineWidth = isSel ? 2 : 1;
     ov.strokeStyle = isSel ? '#00e5ff' : 'rgba(255,255,255,.45)';
     ov.setLineDash(isSel ? [] : [6, 6]);
@@ -249,7 +262,7 @@ function drawOverlay() {
       ov.lineWidth = 1;
       ov.stroke();
     });
-    const cx = p.reduce((a, q) => a + q[0], 0) / 4, cy = p.reduce((a, q) => a + q[1], 0) / 4;
+    const cx = p.reduce((a, q) => a + q[0], 0) / p.length, cy = p.reduce((a, q) => a + q[1], 0) / p.length;
     ov.font = '600 12px system-ui, sans-serif';
     ov.textAlign = 'center';
     ov.fillStyle = 'rgba(0,0,0,.6)';
@@ -257,6 +270,13 @@ function drawOverlay() {
     ov.fillRect(cx - tw / 2, cy - 10, tw, 20);
     ov.fillStyle = '#fff';
     ov.fillText(s.name, cx, cy + 4);
+  }
+  if (drawing && drawing.length > 1) {
+    ov.beginPath();
+    drawing.forEach(([x, y], i) => (i ? ov.lineTo(x * W, y * H) : ov.moveTo(x * W, y * H)));
+    ov.strokeStyle = '#ff2d95';
+    ov.lineWidth = 3;
+    ov.stroke();
   }
 }
 
@@ -269,22 +289,49 @@ function frame(now) {
 }
 
 // ---------- interacción (arrastrar esquinas / mover superficie) ----------
-function pointInQuad(px, py, pts) {
-  let inside = false;
-  for (let i = 0, j = 3; i < 4; j = i++) {
-    const [xi, yi] = pts[i], [xj, yj] = pts[j];
-    if ((yi > py) !== (yj > py) && px < ((xj - xi) * (py - yi)) / (yj - yi) + xi) inside = !inside;
-  }
-  return inside;
+let drag = null;
+let drawing = null;       // trazo en curso del modo Contorno (null = no se está dibujando)
+let drawPointer = null;
+
+function startContour() {
+  closeSheet();
+  drawing = [];
+  sel = null; selCorner = -1;
+  updateChrome();
+  toast('Dibuja con el dedo el contorno del objeto', 3000);
 }
 
-let drag = null;
+function finishContour() {
+  const raw = drawing || [];
+  drawing = null;
+  drawPointer = null;
+  if (raw.length < 3) { updateChrome(); return; }
+  // trazo cerrado: se divide en el punto más lejano del inicio y se simplifica cada mitad
+  const eps = 3 / Math.max(W, H);
+  const far = raw.reduce((best, q, i) => (Math.hypot(q[0] - raw[0][0], q[1] - raw[0][1]) > Math.hypot(raw[best][0] - raw[0][0], raw[best][1] - raw[0][1]) ? i : best), 0);
+  let pts = [...simplify(raw.slice(0, far + 1), eps).slice(0, -1), ...simplify(raw.slice(far), eps)];
+  if (Math.hypot(pts.at(-1)[0] - pts[0][0], pts.at(-1)[1] - pts[0][1]) < 0.02) pts.pop();
+  if (pts.length < 3) { toast('Contorno muy pequeño, intenta de nuevo'); updateChrome(); return; }
+  const s = newSurface(state.counter++, 'poly', pts);
+  state.surfaces.push(s);
+  sel = s.id; selCorner = -1;
+  changed({ ui: true });
+  updateChrome();
+  toast(pts.length + ' puntos · arrástralos para afinar el contorno');
+}
 function canEdit() { return role !== 'output' && !showMode; }
 
 ovCanvas.addEventListener('pointerdown', ev => {
   if (!canEdit()) return;
   const r = ovCanvas.getBoundingClientRect();
   const x = ev.clientX - r.left, y = ev.clientY - r.top;
+  if (drawing) {
+    if (drawPointer !== null) return;
+    drawPointer = ev.pointerId;
+    drawing = [[x / W, y / H]];
+    ovCanvas.setPointerCapture(ev.pointerId);
+    return;
+  }
   const cur = selected();
   let target = null;
   if (cur && cur.visible) {
@@ -298,7 +345,7 @@ ovCanvas.addEventListener('pointerdown', ev => {
   if (!target) {
     for (let i = state.surfaces.length - 1; i >= 0; i--) {
       const s = state.surfaces[i];
-      if (s.visible && pointInQuad(x / W, y / H, s.pts)) { target = { s, corner: -1 }; break; }
+      if (s.visible && pointInPoly(x / W, y / H, hullOf(s))) { target = { s, corner: -1 }; break; }
     }
   }
   if (!target) {
@@ -314,8 +361,14 @@ ovCanvas.addEventListener('pointerdown', ev => {
 });
 
 ovCanvas.addEventListener('pointermove', ev => {
-  if (!drag || ev.pointerId !== drag.id) return;
   const r = ovCanvas.getBoundingClientRect();
+  if (drawing && ev.pointerId === drawPointer) {
+    const q = [(ev.clientX - r.left) / W, (ev.clientY - r.top) / H];
+    const last = drawing.at(-1);
+    if (Math.hypot((q[0] - last[0]) * W, (q[1] - last[1]) * H) > 4) drawing.push(q);
+    return;
+  }
+  if (!drag || ev.pointerId !== drag.id) return;
   const k = precision ? 0.2 : 1;
   const dx = ((ev.clientX - r.left - drag.x) / W) * k;
   const dy = ((ev.clientY - r.top - drag.y) / H) * k;
@@ -329,7 +382,10 @@ ovCanvas.addEventListener('pointermove', ev => {
   changed();
 });
 
-const endDrag = ev => { if (drag && ev.pointerId === drag.id) drag = null; };
+const endDrag = ev => {
+  if (drawing && ev.pointerId === drawPointer) finishContour();
+  if (drag && ev.pointerId === drag.id) drag = null;
+};
 ovCanvas.addEventListener('pointerup', endDrag);
 ovCanvas.addEventListener('pointercancel', endDrag);
 
@@ -358,7 +414,7 @@ document.querySelectorAll('#nudge [data-d]').forEach(b => {
 });
 $('#nudge-corner').addEventListener('click', () => {
   if (!selected()) return;
-  selCorner = selCorner >= 3 ? -1 : selCorner + 1;
+  selCorner = selCorner >= selected().pts.length - 1 ? -1 : selCorner + 1;
   changed({ ui: true });
 });
 $('#precision').addEventListener('click', () => {
@@ -382,8 +438,10 @@ window.addEventListener('pointerdown', () => {
 }, true);
 
 // ---------- acciones ----------
-function addSurface() {
-  const s = newSurface(state.counter++);
+function addSurface(shape = 'quad', extra = {}) {
+  closeSheet();
+  if (shape === 'poly') { startContour(); return; }
+  const s = Object.assign(newSurface(state.counter++, shape), extra);
   state.surfaces.push(s);
   sel = s.id; selCorner = -1;
   changed({ ui: true });
@@ -438,6 +496,49 @@ async function importFiles(files) {
   changed({ ui: true });
 }
 
+function mediaAspect(file) {
+  return new Promise(res => {
+    const url = URL.createObjectURL(file);
+    const done = a => { URL.revokeObjectURL(url); res(a || 1); };
+    if (file.type.startsWith('video')) {
+      const v = document.createElement('video');
+      v.onloadedmetadata = () => done(v.videoWidth / v.videoHeight);
+      v.onerror = () => done(1);
+      v.src = url;
+    } else {
+      const img = new Image();
+      img.onload = () => done(img.naturalWidth / img.naturalHeight);
+      img.onerror = () => done(1);
+      img.src = url;
+    }
+  });
+}
+
+// Cada archivo crea una superficie nueva con la proporción del archivo.
+// Los PNG con transparencia se ven recortados: solo se proyecta la figura.
+async function addMediaSurfaces(files) {
+  closeSheet();
+  for (const f of files) {
+    if (!/^(image|video)\//.test(f.type)) { toast('Formato no soportado: ' + f.name); continue; }
+    const a = (await mediaAspect(f)) * (H / W);   // aspecto en coordenadas normalizadas
+    let w = 0.5, h = w / a;
+    if (h > 0.7) { h = 0.7; w = h * a; }
+    const n = state.surfaces.length % 4;
+    const cx = 0.5 + n * 0.04, cy = 0.5 + n * 0.04;
+    const s = newSurface(state.counter++, 'quad', placeShape('quad', [cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2]));
+    s.name = f.name.replace(/\.[^.]+$/, '').slice(0, 24) || s.name;
+    state.surfaces.push(s);
+    sel = s.id; selCorner = -1;
+    const id = uid();
+    await store.putMedia(id, { blob: f, mime: f.type, name: f.name });
+    knownMedia.add(id);
+    state.media.push({ id, name: f.name, mime: f.type });
+    s.src = { kind: 'media', mediaId: id };
+  }
+  changed({ ui: true });
+  updateChrome();
+}
+
 async function deleteMedia(id) {
   state.media = state.media.filter(m => m.id !== id);
   for (const s of state.surfaces) if (s.src?.mediaId === id) s.src = { kind: 'effect', effect: 'grid' };
@@ -449,14 +550,15 @@ async function deleteMedia(id) {
 function resetCorners() {
   const s = selected();
   if (!s) return;
-  s.pts = [[0.2, 0.2], [0.8, 0.2], [0.8, 0.8], [0.2, 0.8]];
+  const sh = shapeOf(s);
+  s.pts = placeShape(sh, sh === 'cube' || sh === 'circle' ? squareRect(0.5, 0.5, 0.6) : [0.2, 0.2, 0.8, 0.8], s.pts);
   changed();
 }
 
 function fullScreenSurface() {
   const s = selected();
   if (!s) return;
-  s.pts = [[0, 0], [1, 0], [1, 1], [0, 1]];
+  s.pts = placeShape(shapeOf(s), [0, 0, 1, 1], s.pts);
   changed();
 }
 
@@ -679,6 +781,8 @@ function updateChrome() {
 }
 
 function openSheet(name) {
+  drawing = null;
+  drawPointer = null;
   sheet = sheet === name ? null : name;
   renderSheet();
 }
@@ -691,14 +795,33 @@ function sourceLabel(s) {
   return { color: 'Color', text: 'Texto', camera: 'Cámara' }[src.kind] || '—';
 }
 
+function layerLabel(s) {
+  return SHAPES[shapeOf(s)].icon + ' ' + SHAPES[shapeOf(s)].name + ' · ' + sourceLabel(s);
+}
+
 function renderSheet() {
   const el = $('#sheet');
   el.classList.toggle('on', !!sheet);
   updateChromeLight();
   if (!sheet) { el.innerHTML = ''; return; }
   const s = selected();
-  const needSel = '<p class="muted">Toca una superficie en la pantalla o agrega una con <b>＋ Superficie</b>.</p>';
+  const needSel = '<p class="muted">Toca una superficie en la pantalla o agrega una con <b>＋ Agregar</b>.</p>';
   let html = '';
+
+  if (sheet === 'add') {
+    html = `<h3 class="center">Agregar forma</h3>
+      <div class="grid three">
+        ${['quad', 'circle'].map(k => `<button class="tile" data-shape="${k}"><i class="shape-ic">${SHAPES[k].icon}</i><span>${SHAPES[k].name}</span></button>`).join('')}
+        <button class="tile" data-act="addtext"><i class="shape-ic">Ⓣ</i><span>Texto</span></button>
+        ${['poly', 'cube', 'box'].map(k => `<button class="tile" data-shape="${k}"><i class="shape-ic">${SHAPES[k].icon}</i><span>${SHAPES[k].name}</span></button>`).join('')}
+      </div>
+      <label class="feature">
+        <i>🖼️</i>
+        <span><b>PNG transparente / imagen / video</b><small>Crea una superficie con la forma del archivo. En un PNG sin fondo solo se proyecta la figura.</small></span>
+        <input id="addfile" type="file" accept="image/*,video/*" multiple hidden>
+      </label>
+      <p class="muted">Contorno: dibuja con el dedo la silueta del objeto. Cubo: 7 puntos para las 3 caras visibles. Caja: marco + fondo para nichos, ventanas o cuartos.</p>`;
+  }
 
   if (sheet === 'content') {
     html = `<h3>Contenido ${s ? '· ' + esc(s.name) : ''}</h3>` + (!s ? needSel : `
@@ -730,12 +853,13 @@ function renderSheet() {
       <label class="field">Opacidad <input id="f-opacity" type="range" min="0" max="1" step="0.01" value="${s.opacity}"></label>
       <label class="field">Bordes suaves <input id="f-feather" type="range" min="0" max="0.3" step="0.005" value="${s.feather}"></label>
       <label class="field">Velocidad del efecto <input id="f-speed" type="range" min="0" max="4" step="0.05" value="${s.speed}"></label>
+      ${['cube', 'box'].includes(shapeOf(s)) ? `<label class="check"><input id="f-shade" type="checkbox" ${s.shade !== false ? 'checked' : ''}> Sombrear caras (efecto 3D)</label>` : ''}
       ${s.src.kind === 'media' && state.media.find(m => m.id === s.src.mediaId)?.mime.startsWith('video') ? `<label class="check"><input id="f-audio" type="checkbox" ${s.audio ? 'checked' : ''}> Reproducir audio del video</label>` : ''}
       <div class="actions">
         <button data-act="full">⛶ Pantalla completa</button>
         <button data-act="reset">↺ Restablecer</button>
-        <button data-act="fliph">⇋ Voltear H</button>
-        <button data-act="flipv">⇵ Voltear V</button>
+        ${['quad', 'circle'].includes(shapeOf(s)) ? `<button data-act="fliph">⇋ Voltear H</button>
+        <button data-act="flipv">⇵ Voltear V</button>` : ''}
         <button data-act="dup">⧉ Duplicar</button>
         <button data-act="del" class="danger">🗑 Eliminar</button>
       </div>`);
@@ -746,11 +870,11 @@ function renderSheet() {
       <div class="list">${state.surfaces.map(x => `
         <div class="row ${x.id === sel ? 'sel' : ''}">
           <button class="icon" data-vis="${x.id}">${x.visible ? '👁' : '🚫'}</button>
-          <button class="grow" data-pick="${x.id}"><b>${esc(x.name)}</b><small>${esc(sourceLabel(x))}</small></button>
+          <button class="grow" data-pick="${x.id}"><b>${esc(x.name)}</b><small>${esc(layerLabel(x))}</small></button>
           <button class="icon" data-up="${x.id}">↑</button>
           <button class="icon" data-down="${x.id}">↓</button>
         </div>`).join('') || '<p class="muted">Sin superficies.</p>'}</div>
-      <button class="wide" data-act="add">＋ Agregar superficie</button>`;
+      <button class="wide" data-act="add">＋ Agregar forma</button>`;
   }
 
   if (sheet === 'connect') {
@@ -805,6 +929,9 @@ function updateChromeLight() {
 
 function bindSheet(el, s) {
   el.querySelector('#file')?.addEventListener('change', e => importFiles([...e.target.files]));
+  el.querySelector('#addfile')?.addEventListener('change', e => addMediaSurfaces([...e.target.files]));
+  el.querySelectorAll('[data-shape]').forEach(b => b.onclick = () => addSurface(b.dataset.shape));
+  el.querySelector('#f-shade')?.addEventListener('change', e => { s.shade = e.target.checked; changed(); });
   el.querySelectorAll('[data-kind]').forEach(b => b.onclick = () => setSource({ kind: b.dataset.kind }));
   el.querySelectorAll('[data-effect]').forEach(b => b.onclick = () => setSource({ kind: 'effect', effect: b.dataset.effect }));
   el.querySelectorAll('[data-media]').forEach(b => b.onclick = () => setSource({ kind: 'media', mediaId: b.dataset.media }));
@@ -842,7 +969,11 @@ function bindSheet(el, s) {
   el.querySelectorAll('[data-act]').forEach(b => b.onclick = () => {
     const a = b.dataset.act;
     if (a === 'close') closeSheet();
-    else if (a === 'add') addSurface();
+    else if (a === 'add') openSheet('add');
+    else if (a === 'addtext') {
+      addSurface('quad', { src: { kind: 'text' }, name: 'Texto ' + state.counter, pts: placeShape('quad', [0.2, 0.35, 0.8, 0.65]) });
+      openSheet('adjust');
+    }
     else if (a === 'full') fullScreenSurface();
     else if (a === 'reset') resetCorners();
     else if (a === 'fliph') flip('h');
@@ -871,7 +1002,6 @@ $('#bar').addEventListener('click', e => {
   const b = e.target.closest('button');
   if (!b) return;
   if (b.dataset.sheet) openSheet(b.dataset.sheet);
-  else if (b.id === 'btn-add') addSurface();
   else if (b.id === 'btn-show') setShow(!showMode);
 });
 

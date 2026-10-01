@@ -20,6 +20,8 @@ uniform vec3 u_c2;
 uniform float u_time;
 uniform float u_opacity;
 uniform float u_feather;
+uniform int u_shape;     // 0 = rectángulo, 1 = círculo
+uniform float u_gain;    // brillo por cara (cubo / caja)
 
 vec3 hsv2rgb(vec3 c) {
   vec4 K = vec4(1.0, 2.0 / 3.0, 1.0 / 3.0, 3.0);
@@ -86,11 +88,15 @@ void main() {
   }
 
   float f = 1.0;
-  if (u_feather > 0.0) {
+  if (u_shape == 1) {
+    float r = length(uv - 0.5) * 2.0;
+    if (r > 1.0) discard;
+    if (u_feather > 0.0) f = smoothstep(0.0, u_feather * 2.0, 1.0 - r);
+  } else if (u_feather > 0.0) {
     f = smoothstep(0.0, u_feather, uv.x) * smoothstep(0.0, u_feather, 1.0 - uv.x)
       * smoothstep(0.0, u_feather, uv.y) * smoothstep(0.0, u_feather, 1.0 - uv.y);
   }
-  gl_FragColor = vec4(col.rgb, col.a * u_opacity * f);
+  gl_FragColor = vec4(col.rgb * u_gain, col.a * u_opacity * f);
 }`;
 
 // Homografía que lleva el cuadrado unitario (0,0)(1,0)(1,1)(0,1) a los 4 puntos.
@@ -139,7 +145,7 @@ function isReady(el) {
 export class Renderer {
   constructor(canvas) {
     this.canvas = canvas;
-    const gl = canvas.getContext('webgl', { alpha: false, antialias: true, premultipliedAlpha: false });
+    const gl = canvas.getContext('webgl', { alpha: false, antialias: true, premultipliedAlpha: false, stencil: true });
     if (!gl) throw new Error('WebGL no disponible');
     this.gl = gl;
     const prog = gl.createProgram();
@@ -154,7 +160,7 @@ export class Renderer {
     if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog));
     gl.useProgram(prog);
     this.u = {};
-    for (const n of ['u_inv', 'u_tex', 'u_mode', 'u_c1', 'u_c2', 'u_time', 'u_opacity', 'u_feather']) {
+    for (const n of ['u_inv', 'u_tex', 'u_mode', 'u_c1', 'u_c2', 'u_time', 'u_opacity', 'u_feather', 'u_shape', 'u_gain']) {
       this.u[n] = gl.getUniformLocation(prog, n);
     }
     this.buf = gl.createBuffer();
@@ -211,33 +217,70 @@ export class Renderer {
     if (e) { this.gl.deleteTexture(e.t); this.tex.delete(key); }
   }
 
-  // items: [{ pts, mode, texKey, el, c1, c2, time, opacity, feather }]
+  quad(pts) {
+    const gl = this.gl;
+    const [p0, p1, p2, p3] = pts;
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.buf);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([...p0, ...p1, ...p2, ...p0, ...p2, ...p3]), gl.DYNAMIC_DRAW);
+    gl.drawArrays(gl.TRIANGLES, 0, 6);
+  }
+
+  setInv(pts) {
+    const inv = invert3(squareToQuad(pts));
+    if (!inv) return false;
+    // mat3 en GLSL es column-major
+    this.gl.uniformMatrix3fv(this.u.u_inv, false, [inv[0], inv[3], inv[6], inv[1], inv[4], inv[7], inv[2], inv[5], inv[8]]);
+    return true;
+  }
+
+  // items: [{ faces: [{ pts, gain }], poly?, shape, mode, texKey, el, c1, c2, time, opacity, feather }]
   draw(items) {
     const gl = this.gl;
     this.frame++;
     gl.clearColor(0, 0, 0, 1);
-    gl.clear(gl.COLOR_BUFFER_BIT);
+    gl.clearStencil(0);
+    gl.clear(gl.COLOR_BUFFER_BIT | gl.STENCIL_BUFFER_BIT);
     for (const it of items) {
-      const inv = invert3(squareToQuad(it.pts));
-      if (!inv) continue;
       let mode = it.mode;
       if (mode === 0) {
         const t = this.texture(it.texKey, it.el);
         if (!t) { mode = 1; it.c1 = '#0d0d12'; }
         else { gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, t); }
       }
-      // mat3 en GLSL es column-major
-      gl.uniformMatrix3fv(this.u.u_inv, false, [inv[0], inv[3], inv[6], inv[1], inv[4], inv[7], inv[2], inv[5], inv[8]]);
       gl.uniform1i(this.u.u_mode, mode);
       gl.uniform3fv(this.u.u_c1, hexToRgb(it.c1));
       gl.uniform3fv(this.u.u_c2, hexToRgb(it.c2));
       gl.uniform1f(this.u.u_time, it.time);
       gl.uniform1f(this.u.u_opacity, it.opacity);
       gl.uniform1f(this.u.u_feather, it.feather);
-      const [p0, p1, p2, p3] = it.pts;
-      gl.bindBuffer(gl.ARRAY_BUFFER, this.buf);
-      gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([...p0, ...p1, ...p2, ...p0, ...p2, ...p3]), gl.DYNAMIC_DRAW);
-      gl.drawArrays(gl.TRIANGLES, 0, 6);
+      gl.uniform1i(this.u.u_shape, it.shape || 0);
+
+      if (it.poly) {
+        // Contorno libre: el polígono (aunque sea cóncavo) se marca en el stencil
+        // con un abanico de triángulos e INVERT; luego se pinta su caja envolvente.
+        const n = it.poly.length;
+        if (n < 3) continue;
+        gl.enable(gl.STENCIL_TEST);
+        gl.clear(gl.STENCIL_BUFFER_BIT);
+        gl.colorMask(false, false, false, false);
+        gl.stencilFunc(gl.ALWAYS, 0, 0xff);
+        gl.stencilOp(gl.KEEP, gl.KEEP, gl.INVERT);
+        gl.uniformMatrix3fv(this.u.u_inv, false, [1, 0, 0, 0, 1, 0, 0, 0, 1]);
+        const fan = [];
+        for (let i = 1; i < n - 1; i++) fan.push(...it.poly[0], ...it.poly[i], ...it.poly[i + 1]);
+        gl.bindBuffer(gl.ARRAY_BUFFER, this.buf);
+        gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(fan), gl.DYNAMIC_DRAW);
+        gl.drawArrays(gl.TRIANGLES, 0, fan.length / 2);
+        gl.colorMask(true, true, true, true);
+        gl.stencilFunc(gl.NOTEQUAL, 0, 0xff);
+        gl.stencilOp(gl.KEEP, gl.KEEP, gl.KEEP);
+      }
+      for (const f of it.faces) {
+        if (!this.setInv(f.pts)) continue;
+        gl.uniform1f(this.u.u_gain, f.gain ?? 1);
+        this.quad(f.pts);
+      }
+      if (it.poly) gl.disable(gl.STENCIL_TEST);
     }
   }
 }
