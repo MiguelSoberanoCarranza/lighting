@@ -118,3 +118,14 @@ export function simplify(pts, eps) {
   if (max <= eps) return [a, b];
   return [...simplify(pts.slice(0, idx + 1), eps).slice(0, -1), ...simplify(pts.slice(idx), eps)];
 }
+
+// Igual que simplify pero para un trazo cerrado: se parte en el punto más
+// lejano del inicio y se simplifica cada mitad.
+export function simplifyClosed(raw, eps) {
+  if (raw.length < 4) return raw;
+  const d = q => Math.hypot(q[0] - raw[0][0], q[1] - raw[0][1]);
+  let far = 0;
+  raw.forEach((q, i) => { if (d(q) > d(raw[far])) far = i; });
+  const pts = [...simplify(raw.slice(0, far + 1), eps).slice(0, -1), ...simplify([...raw.slice(far), raw[0]], eps).slice(0, -1)];
+  return pts;
+}

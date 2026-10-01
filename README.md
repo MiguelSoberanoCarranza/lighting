@@ -31,6 +31,12 @@ tu propio [peerjs-server](https://github.com/peers/peerjs-server) y configurarlo
 ## Funciones
 - **Agregar forma**: cuadrado, círculo, texto, contorno a mano alzada (dibujas la silueta con el dedo),
   cubo (3 caras con sombreado 3D), caja (marco + fondo, para nichos/ventanas) y PNG transparente.
+- **Detección de formas**: tomas una foto, la app encuentra el área iluminada por el proyector,
+  detecta los objetos (bordes) y los convierte en superficies ya colocadas en su lugar
+  (corrige la perspectiva de la foto). Si falta alguno, lo tocas y la varita mágica lo selecciona.
+  En modo control remoto, el proyector se pone en blanco mientras tomas la foto.
+- **Fondo de mapeo**: la foto enderezada queda como guía detrás de tus superficies mientras editas
+  (opacidad ajustable, opcionalmente también en el proyector).
 - Corner‑pin con corrección de perspectiva real (homografía en WebGL), varias superficies/capas.
 - Fuentes: video (en loop, con audio opcional), foto, texto, color, cámara en vivo.
 - 10 efectos de luz generativos: arcoíris, franjas, pulso, barrido, escáner, destellos,
@@ -86,6 +92,8 @@ js/app.js           estado, edición táctil, paneles, modo show, conexión
 js/renderer.js      WebGL: warp de perspectiva + efectos de luz (shaders)
 js/store.js         archivos en IndexedDB
 js/shapes.js        geometría de las formas (cubo, caja, círculo, contorno)
+js/vision.js        visión por computadora sin librerías (área proyectada, bordes, varita, enderezar)
+js/vision-ui.js     pantalla de detección de formas / fondo de mapeo
 js/link.js          enlace celular ↔ proyector (WebRTC con PeerJS)
 vendor/             peerjs 1.5.4 y qrcode-generator 1.4.4 (MIT), incluidos sin CDN
 sw.js               offline (red primero, caché de respaldo)

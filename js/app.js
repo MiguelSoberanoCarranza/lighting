@@ -1,7 +1,9 @@
 import { Renderer } from './renderer.js';
 import * as store from './store.js';
 import { Link } from './link.js';
-import { SHAPES, shapeOf, placeShape, facesOf, hullOf, outlinesOf, pointInPoly, simplify } from './shapes.js';
+import { openVisionTool, visionHelp } from './vision-ui.js';
+import { photoToProjector } from './vision.js';
+import { SHAPES, shapeOf, placeShape, facesOf, hullOf, outlinesOf, pointInPoly, simplifyClosed } from './shapes.js';
 
 // ---------- constantes ----------
 const EFFECTS = [
@@ -79,6 +81,7 @@ let sheet = null;            // panel abierto
 let outAspect = null;        // remoto: aspecto de la pantalla del proyector
 let remoteUI = { editing: true, sel: null, corner: -1 }; // salida: lo que hace el celular
 let knownMedia = new Set();
+let calib = false;           // proyector en blanco mientras se toma la foto
 const pendingNeed = new Set();
 
 const selected = () => state.surfaces.find(s => s.id === sel) || null;
@@ -284,7 +287,20 @@ const t0 = performance.now();
 function frame(now) {
   requestAnimationFrame(frame);
   const time = (now - t0) / 1000;
-  renderer.draw(state.surfaces.filter(s => s.visible).map(s => itemFor(s, time)));
+  const FULL = [[0, 0], [1, 0], [1, 1], [0, 1]];
+  if (calib) {
+    renderer.draw([{ faces: [{ pts: FULL }], mode: 1, c1: '#ffffff', c2: '#ffffff', time: 0, opacity: 1, feather: 0 }]);
+    drawOverlay();
+    return;
+  }
+  const items = [];
+  const bg = state.bg;
+  const editing = role === 'output' ? link.connected && remoteUI.editing && bg?.project : !showMode;
+  if (bg?.mediaId && bg.show !== false && editing) {
+    items.push({ faces: [{ pts: FULL }], mode: 0, texKey: 'm:' + bg.mediaId, el: mediaEl(bg.mediaId).el, c1: '#000000', c2: '#000000', time: 0, opacity: bg.opacity ?? 0.6, feather: 0 });
+  }
+  for (const s of state.surfaces) if (s.visible) items.push(itemFor(s, time));
+  renderer.draw(items);
   drawOverlay();
 }
 
@@ -306,10 +322,7 @@ function finishContour() {
   drawing = null;
   drawPointer = null;
   if (raw.length < 3) { updateChrome(); return; }
-  // trazo cerrado: se divide en el punto más lejano del inicio y se simplifica cada mitad
-  const eps = 3 / Math.max(W, H);
-  const far = raw.reduce((best, q, i) => (Math.hypot(q[0] - raw[0][0], q[1] - raw[0][1]) > Math.hypot(raw[best][0] - raw[0][0], raw[best][1] - raw[0][1]) ? i : best), 0);
-  let pts = [...simplify(raw.slice(0, far + 1), eps).slice(0, -1), ...simplify(raw.slice(far), eps)];
+  let pts = simplifyClosed(raw, 3 / Math.max(W, H));
   if (Math.hypot(pts.at(-1)[0] - pts[0][0], pts.at(-1)[1] - pts[0][1]) < 0.02) pts.pop();
   if (pts.length < 3) { toast('Contorno muy pequeño, intenta de nuevo'); updateChrome(); return; }
   const s = newSurface(state.counter++, 'poly', pts);
@@ -539,6 +552,76 @@ async function addMediaSurfaces(files) {
   updateChrome();
 }
 
+// ---------- detección de formas / fondo de mapeo ----------
+function orderQuad(p) {
+  // TL, TR, BR, BL en sentido horario
+  const c = [p.reduce((a, q) => a + q[0], 0) / 4, p.reduce((a, q) => a + q[1], 0) / 4];
+  const sorted = [...p].sort((a, b) => Math.atan2(a[1] - c[1], a[0] - c[0]) - Math.atan2(b[1] - c[1], b[0] - c[0]));
+  const start = sorted.reduce((bi, q, i) => (q[0] + q[1] < sorted[bi][0] + sorted[bi][1] ? i : bi), 0);
+  return [...sorted.slice(start), ...sorted.slice(0, start)];
+}
+
+function startVision(mode, file) {
+  if (!file) return;
+  closeSheet();
+  if (role === 'remote') link.send({ t: 'calib', on: false });
+  openVisionTool({
+    file, mode,
+    aspect: W / H,
+    areaHint: 'Ajusta las 4 esquinas (1 arriba-izq → 4 abajo-izq) al área que ilumina el proyector.',
+    onClose: () => {},
+    onDone: async ({ shapes, quad, background }) => {
+      if (background) await setBackground(background);
+      const created = [];
+      for (const pts of shapes) {
+        let pp = photoToProjector(quad, pts);
+        const isQuad = pp.length === 4;
+        if (isQuad) pp = orderQuad(pp);
+        const s = newSurface(state.counter++, isQuad ? 'quad' : 'poly', pp);
+        s.name = 'Forma ' + (created.length + 1);
+        state.surfaces.push(s);
+        created.push(s);
+      }
+      if (created.length) { sel = created.at(-1).id; selCorner = -1; }
+      changed({ ui: true });
+      updateChrome();
+      toast(created.length
+        ? `${created.length} formas agregadas · ajusta sus puntos si hace falta`
+        : 'Fondo de mapeo listo: dibuja tus superficies encima');
+    },
+  });
+}
+
+async function setBackground(canvas) {
+  const blob = await new Promise(res => canvas.toBlob(res, 'image/jpeg', 0.85));
+  if (!blob) return;
+  const old = state.bg?.mediaId;
+  const id = uid();
+  await store.putMedia(id, { blob, mime: 'image/jpeg', name: 'fondo-de-mapeo.jpg' });
+  knownMedia.add(id);
+  state.bg = { mediaId: id, opacity: state.bg?.opacity ?? 0.6, show: true, project: state.bg?.project ?? false };
+  if (old) { forgetMedia(old); store.delMedia(old); }
+  changed({ ui: true });
+}
+
+async function removeBackground() {
+  const old = state.bg?.mediaId;
+  state.bg = null;
+  if (old) { forgetMedia(old); await store.delMedia(old); }
+  changed({ ui: true });
+}
+
+// el proyector se pone en blanco mientras el celular toma la foto (modo remoto)
+function calibFor(input) {
+  input.addEventListener('click', () => {
+    if (role === 'remote') {
+      link.send({ t: 'calib', on: true });
+      toast('Proyector en blanco: toma la foto', 3000);
+    }
+  });
+}
+window.addEventListener('focus', () => { if (role === 'remote') setTimeout(() => link.send({ t: 'calib', on: false }), 1500); });
+
 async function deleteMedia(id) {
   state.media = state.media.filter(m => m.id !== id);
   for (const s of state.surfaces) if (s.src?.mediaId === id) s.src = { kind: 'effect', effect: 'grid' };
@@ -659,8 +742,9 @@ async function onMessage(m) {
       remoteUI = m.ui || remoteUI;
       try { localStorage.setItem(SAVE_KEY, JSON.stringify(state)); } catch { /* nada */ }
       const need = [];
-      for (const s of state.surfaces) {
-        const id = s.src?.kind === 'media' ? s.src.mediaId : null;
+      const ids = state.surfaces.map(s => (s.src?.kind === 'media' ? s.src.mediaId : null));
+      if (state.bg?.project) ids.push(state.bg.mediaId);
+      for (const id of ids) {
         if (id && !knownMedia.has(id) && !pendingNeed.has(id)) { pendingNeed.add(id); need.push(id); }
       }
       if (need.length) link.send({ t: 'need', ids: need });
@@ -671,6 +755,8 @@ async function onMessage(m) {
       pendingNeed.delete(m.id);
       forgetMedia(m.id);
       toast('Recibido: ' + m.name);
+    } else if (m.t === 'calib') {
+      calib = !!m.on;
     }
   } else if (role === 'remote') {
     if (m.t === 'hello' || m.t === 'aspect') {
@@ -820,6 +906,23 @@ function renderSheet() {
         <span><b>PNG transparente / imagen / video</b><small>Crea una superficie con la forma del archivo. En un PNG sin fondo solo se proyecta la figura.</small></span>
         <input id="addfile" type="file" accept="image/*,video/*" multiple hidden>
       </label>
+      <label class="feature">
+        <i>📷</i>
+        <span><b>Detección de formas</b><small>Toma una foto y encuentra las formas automáticamente.</small></span>
+        <input id="detectfile" type="file" accept="image/*" capture="environment" hidden>
+      </label>
+      <hr class="sep">
+      <label class="feature">
+        <i>🗺️</i>
+        <span><b>Fondo de mapeo</b><small>${state.bg ? 'Cambiar la foto de referencia.' : 'Crea una imagen de referencia para alinear tu proyección.'}</small></span>
+        <input id="bgfile" type="file" accept="image/*" capture="environment" hidden>
+      </label>
+      ${state.bg ? `
+        <label class="field">Opacidad del fondo <input id="bg-op" type="range" min="0.1" max="1" step="0.05" value="${state.bg.opacity ?? 0.6}"></label>
+        <label class="check"><input id="bg-show" type="checkbox" ${state.bg.show !== false ? 'checked' : ''}> Mostrar fondo mientras edito</label>
+        ${role === 'remote' ? `<label class="check"><input id="bg-proj" type="checkbox" ${state.bg.project ? 'checked' : ''}> Mostrarlo también en el proyector</label>` : ''}
+        <div class="actions"><button data-act="bgdel" class="danger">Quitar fondo</button></div>` : ''}
+      <p class="muted">${esc(visionHelp(role === 'remote'))}</p>
       <p class="muted">Contorno: dibuja con el dedo la silueta del objeto. Cubo: 7 puntos para las 3 caras visibles. Caja: marco + fondo para nichos, ventanas o cuartos.</p>`;
   }
 
@@ -930,6 +1033,15 @@ function updateChromeLight() {
 function bindSheet(el, s) {
   el.querySelector('#file')?.addEventListener('change', e => importFiles([...e.target.files]));
   el.querySelector('#addfile')?.addEventListener('change', e => addMediaSurfaces([...e.target.files]));
+  for (const [sel_, mode] of [['#detectfile', 'detect'], ['#bgfile', 'background']]) {
+    const inp = el.querySelector(sel_);
+    if (!inp) continue;
+    calibFor(inp);
+    inp.addEventListener('change', e => startVision(mode, e.target.files[0]));
+  }
+  el.querySelector('#bg-op')?.addEventListener('input', e => { state.bg.opacity = parseFloat(e.target.value); changed(); });
+  el.querySelector('#bg-show')?.addEventListener('change', e => { state.bg.show = e.target.checked; changed(); });
+  el.querySelector('#bg-proj')?.addEventListener('change', e => { state.bg.project = e.target.checked; changed(); });
   el.querySelectorAll('[data-shape]').forEach(b => b.onclick = () => addSurface(b.dataset.shape));
   el.querySelector('#f-shade')?.addEventListener('change', e => { s.shade = e.target.checked; changed(); });
   el.querySelectorAll('[data-kind]').forEach(b => b.onclick = () => setSource({ kind: b.dataset.kind }));
@@ -970,6 +1082,7 @@ function bindSheet(el, s) {
     const a = b.dataset.act;
     if (a === 'close') closeSheet();
     else if (a === 'add') openSheet('add');
+    else if (a === 'bgdel' && confirm('¿Quitar el fondo de mapeo?')) removeBackground();
     else if (a === 'addtext') {
       addSurface('quad', { src: { kind: 'text' }, name: 'Texto ' + state.counter, pts: placeShape('quad', [0.2, 0.35, 0.8, 0.65]) });
       openSheet('adjust');
