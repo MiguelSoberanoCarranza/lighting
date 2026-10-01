@@ -5,6 +5,8 @@ ajustas las 4 esquinas de cada superficie sobre un objeto real (pared, caja, fac
 escenario…) y le proyectas **videos, fotos, texto, cámara en vivo o efectos de luz**.
 Todo se controla desde el celular. No hay que instalar nada: se abre en el navegador.
 
+**▶ Abrir la app: https://miguelsoberanocarranza.github.io/lighting/**
+
 ## Cómo se usa
 
 ### Opción A: solo el celular
