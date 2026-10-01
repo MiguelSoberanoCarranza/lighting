@@ -43,9 +43,8 @@ tu propio [peerjs-server](https://github.com/peers/peerjs-server) y configurarlo
 ## Publicarla / correrla
 Es un sitio estático, sin build.
 
-- **GitHub Pages**: el workflow `.github/workflows/pages.yml` publica al hacer push a `main`.
-  Actívalo en *Settings → Pages → Source: GitHub Actions*. Queda en
-  `https://<usuario>.github.io/lighting/` (con HTTPS, necesario para cámara y app instalable).
+- **GitHub Pages**: se publica sola desde la rama `main` (Settings → Pages → *Deploy from a branch*, carpeta raíz).
+  Cada push a `main` actualiza `https://miguelsoberanocarranza.github.io/lighting/` en 1–2 minutos.
 - **Local**: `python3 -m http.server 8080` en esta carpeta y abre `http://localhost:8080`.
 
 ## Investigación: apps de este tipo (2026)
