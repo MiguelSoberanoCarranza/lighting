@@ -28,12 +28,36 @@ const uid = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(3
 const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
-function toast(msg, ms = 2200) {
+function toast(msg, ms = 2200, action = null) {
   const t = $('#toast');
   t.textContent = msg;
+  if (action) {
+    const b = document.createElement('button');
+    b.textContent = action.label;
+    b.onclick = () => { t.classList.remove('on'); action.run(); };
+    t.append(' ', b);
+  }
+  t.classList.toggle('action', !!action);
   t.classList.add('on');
   clearTimeout(toast.h);
   toast.h = setTimeout(() => t.classList.remove('on'), ms);
+}
+
+// Confirmación propia: confirm() del navegador no aparece en algunos celulares
+// (pantalla completa, app instalada, navegadores de WhatsApp/Instagram).
+function ask(msg, okLabel = 'Aceptar') {
+  return new Promise(res => {
+    const d = document.createElement('div');
+    d.className = 'ask';
+    d.innerHTML = `<div class="ask-box"><p>${esc(msg)}</p><div class="ask-btns"><button data-r="0">Cancelar</button><button data-r="1" class="danger-fill">${esc(okLabel)}</button></div></div>`;
+    d.addEventListener('click', e => {
+      const b = e.target.closest('[data-r]');
+      if (!b && e.target !== d) return;
+      d.remove();
+      res(b?.dataset.r === '1');
+    });
+    document.body.appendChild(d);
+  });
 }
 
 // ---------- estado ----------
@@ -430,6 +454,7 @@ $('#nudge-corner').addEventListener('click', () => {
   selCorner = selCorner >= selected().pts.length - 1 ? -1 : selCorner + 1;
   changed({ ui: true });
 });
+$('#nudge-del').addEventListener('click', () => { if (sel) removeSurface(sel); });
 $('#precision').addEventListener('click', () => {
   precision = !precision;
   updateChrome();
@@ -461,12 +486,25 @@ function addSurface(shape = 'quad', extra = {}) {
   toast('Arrastra las esquinas para ajustarla al objeto');
 }
 
+// Borra sin preguntar y ofrece "Deshacer" (más cómodo en el celular).
 function removeSurface(id) {
-  state.surfaces = state.surfaces.filter(s => s.id !== id);
+  const index = state.surfaces.findIndex(s => s.id === id);
+  if (index < 0) return;
+  const [gone] = state.surfaces.splice(index, 1);
   textCanvases.delete(id);
   renderer.dropTexture('t:' + id);
-  if (sel === id) { sel = state.surfaces.at(-1)?.id ?? null; selCorner = -1; }
+  if (sel === id) { sel = null; selCorner = -1; }
   changed({ ui: true });
+  updateChrome();
+  toast('Eliminaste "' + gone.name + '"', 5000, {
+    label: 'Deshacer',
+    run: () => {
+      state.surfaces.splice(Math.min(index, state.surfaces.length), 0, gone);
+      sel = gone.id; selCorner = -1;
+      changed({ ui: true });
+      updateChrome();
+    },
+  });
 }
 
 function duplicateSurface() {
@@ -700,7 +738,7 @@ stage.addEventListener('pointerdown', () => {
 });
 $('#exit').addEventListener('click', () => {
   if (role === 'output') {
-    if (confirm('¿Dejar de ser la pantalla del proyector?')) stopLink();
+    ask('¿Dejar de ser la pantalla del proyector?', 'Salir').then(ok => ok && stopLink());
   } else setShow(false);
 });
 
@@ -959,12 +997,12 @@ function renderSheet() {
       ${['cube', 'box'].includes(shapeOf(s)) ? `<label class="check"><input id="f-shade" type="checkbox" ${s.shade !== false ? 'checked' : ''}> Sombrear caras (efecto 3D)</label>` : ''}
       ${s.src.kind === 'media' && state.media.find(m => m.id === s.src.mediaId)?.mime.startsWith('video') ? `<label class="check"><input id="f-audio" type="checkbox" ${s.audio ? 'checked' : ''}> Reproducir audio del video</label>` : ''}
       <div class="actions">
+        <button data-act="del" class="danger">🗑 Eliminar</button>
         <button data-act="full">⛶ Pantalla completa</button>
         <button data-act="reset">↺ Restablecer</button>
         ${['quad', 'circle'].includes(shapeOf(s)) ? `<button data-act="fliph">⇋ Voltear H</button>
         <button data-act="flipv">⇵ Voltear V</button>` : ''}
         <button data-act="dup">⧉ Duplicar</button>
-        <button data-act="del" class="danger">🗑 Eliminar</button>
       </div>`);
   }
 
@@ -976,6 +1014,7 @@ function renderSheet() {
           <button class="grow" data-pick="${x.id}"><b>${esc(x.name)}</b><small>${esc(layerLabel(x))}</small></button>
           <button class="icon" data-up="${x.id}">↑</button>
           <button class="icon" data-down="${x.id}">↓</button>
+          <button class="icon danger" data-del="${x.id}" aria-label="Eliminar">🗑</button>
         </div>`).join('') || '<p class="muted">Sin superficies.</p>'}</div>
       <button class="wide" data-act="add">＋ Agregar forma</button>`;
   }
@@ -1047,11 +1086,12 @@ function bindSheet(el, s) {
   el.querySelectorAll('[data-kind]').forEach(b => b.onclick = () => setSource({ kind: b.dataset.kind }));
   el.querySelectorAll('[data-effect]').forEach(b => b.onclick = () => setSource({ kind: 'effect', effect: b.dataset.effect }));
   el.querySelectorAll('[data-media]').forEach(b => b.onclick = () => setSource({ kind: 'media', mediaId: b.dataset.media }));
-  el.querySelectorAll('[data-delmedia]').forEach(b => b.onclick = () => { if (confirm('¿Borrar este archivo?')) deleteMedia(b.dataset.delmedia); });
+  el.querySelectorAll('[data-delmedia]').forEach(b => b.onclick = () => { ask('¿Borrar este archivo?', 'Borrar').then(ok => ok && deleteMedia(b.dataset.delmedia)); });
   el.querySelectorAll('[data-pick]').forEach(b => b.onclick = () => { sel = b.dataset.pick; selCorner = -1; changed({ ui: true }); });
   el.querySelectorAll('[data-vis]').forEach(b => b.onclick = () => { const x = state.surfaces.find(q => q.id === b.dataset.vis); x.visible = !x.visible; changed({ ui: true }); });
   el.querySelectorAll('[data-up]').forEach(b => b.onclick = () => moveLayer(b.dataset.up, -1));
   el.querySelectorAll('[data-down]').forEach(b => b.onclick = () => moveLayer(b.dataset.down, 1));
+  el.querySelectorAll('[data-del]').forEach(b => b.onclick = () => removeSurface(b.dataset.del));
 
   const bind = (id, key, num) => {
     const i = el.querySelector(id);
@@ -1082,7 +1122,7 @@ function bindSheet(el, s) {
     const a = b.dataset.act;
     if (a === 'close') closeSheet();
     else if (a === 'add') openSheet('add');
-    else if (a === 'bgdel' && confirm('¿Quitar el fondo de mapeo?')) removeBackground();
+    else if (a === 'bgdel') ask('¿Quitar el fondo de mapeo?', 'Quitar').then(ok => ok && removeBackground());
     else if (a === 'addtext') {
       addSurface('quad', { src: { kind: 'text' }, name: 'Texto ' + state.counter, pts: placeShape('quad', [0.2, 0.35, 0.8, 0.65]) });
       openSheet('adjust');
@@ -1092,7 +1132,7 @@ function bindSheet(el, s) {
     else if (a === 'fliph') flip('h');
     else if (a === 'flipv') flip('v');
     else if (a === 'dup') duplicateSurface();
-    else if (a === 'del' && s && confirm('¿Eliminar "' + s.name + '"?')) removeSurface(s.id);
+    else if (a === 'del' && s) removeSurface(s.id);
     else if (a === 'host') startOutput();
     else if (a === 'join') startRemote(el.querySelector('#code').value);
     else if (a === 'rejoin') startRemote(localStorage.getItem('proyectalo.join'));
@@ -1103,10 +1143,13 @@ function bindSheet(el, s) {
       aEl.href = URL.createObjectURL(blob);
       aEl.download = 'mapeo.json';
       aEl.click();
-    } else if (a === 'new' && confirm('¿Borrar todo y empezar de nuevo?')) {
-      state = defaultState();
-      sel = state.surfaces[0].id;
-      changed({ ui: true });
+    } else if (a === 'new') {
+      ask('¿Borrar todo y empezar de nuevo?', 'Borrar todo').then(ok => {
+        if (!ok) return;
+        state = defaultState();
+        sel = state.surfaces[0].id;
+        changed({ ui: true });
+      });
     }
   });
 }
